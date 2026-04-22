@@ -3,6 +3,7 @@ import {
   calculateTotals,
   createOrderDocument,
   generateOrderId,
+  isValidStatusTransition,
 } from "../utils/helper.js";
 
 export const orderHandler = (io, socket) => {
@@ -86,5 +87,101 @@ export const orderHandler = (io, socket) => {
       console.error("Cancel order error", error);
       callback({ success: false, message: error.message });
     }
+  });
+  socket.on("getMyOrders", async (data, callback) => {
+    try {
+      const ordersCollection = getCollection("orders");
+      const orders = await ordersCollection
+        .findOne({
+          customerPhone: data.customerPhone,
+        })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .toArray();
+      callback({ success: true, orders });
+    } catch (error) {
+      console.error("Get orders error", error);
+      callback({ success: false, message: error.message });
+    }
+  });
+  // admin event
+
+  // admin login
+  socket.on("adminLogin", async (data, callback) => {
+    try {
+      if (data.password == process.env.ADMIN_PASSWORD) {
+        socket.isAdmin = true;
+        socket.join("admins");
+        console.log(`admin logged in: ${socket.id}`);
+        callback({ success: true });
+      } else {
+        callback({ success: false, message: "invalid password" });
+      }
+    } catch (error) {
+      callback({ success: false, message: "Login failed" });
+    }
+  });
+  // admin get all orders
+  socket.on("getAllOrders", async (data, callback) => {
+    try {
+      if (!socket.isAdmin) {
+        return callback({ success: false, message: "Unauthorized" });
+      }
+      const ordersCollection = getCollection("orders");
+      const filter = data?.status ? { status: data.status } : {};
+      const orders = await ordersCollection
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .toArray();
+      callback({ success: true, orders });
+    } catch (error) {
+      callback({ success: false, message: error.message });
+    }
+  });
+  socket.on("updateOrderStatus", async (data, callback) => {
+    try {
+      const ordersCollection = getCollection("orders");
+      const order = await ordersCollection.findOne({
+        orderId: data.orderId,
+      });
+      if (!order) {
+        return callback({ success: false, message: "Order not found" });
+      }
+      if (!isValidStatusTransition(order.status, data.newStatus)) {
+        return callback({
+          success: false,
+          message: "Invalid status transition",
+        });
+      }
+      const result = await ordersCollection.findOneAndUpdate(
+        {
+          orderId: data.orderId,
+        },
+        {
+          $set: { status: data.newStatus, updatedAt: new Date() },
+          $push: {
+            statusHistory: {
+              status: data.newStatus,
+              timestamp: new Date(),
+              by: socket.id,
+              note: "Status update by Admin",
+            },
+          },
+        },
+      );
+      io.to(`order-${data.orderId}`).emit("statusUpdated", {
+        orderId: data.orderId,
+        status: data.newStatus,
+        order: result,
+      });
+      socket.to(
+        "admins".emit("orderStatusChanged", {
+          orderId: data.orderId,
+          newStatus: data.newStatus,
+        }),
+        callback({ success: true, order: result }),
+      );
+    } catch (error) {}
   });
 };
