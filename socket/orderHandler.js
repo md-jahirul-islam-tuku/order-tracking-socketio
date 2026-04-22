@@ -175,13 +175,141 @@ export const orderHandler = (io, socket) => {
         status: data.newStatus,
         order: result,
       });
-      socket.to(
-        "admins".emit("orderStatusChanged", {
-          orderId: data.orderId,
-          newStatus: data.newStatus,
-        }),
-        callback({ success: true, order: result }),
-      );
+      socket.to("admins").emit("orderStatusChanged", {
+        orderId: data.orderId,
+        newStatus: data.newStatus,
+      });
+      callback({ success: true, order: result });
     } catch (error) {}
+  });
+  socket.on("acceptOrder", async (data, callback) => {
+    try {
+      if (!socket.isAdmin) {
+        return callback({ success: false, message: "Unauthorized" });
+      }
+      const ordersCollection = getCollection("orders");
+      const order = await ordersCollection.findOne({
+        orderId: data.orderId,
+      });
+      if (!order || order.status !== "pending") {
+        return callback({
+          success: false,
+          message: "Can not accept this order",
+        });
+      }
+      const estimatedTime = data.estimatedTime || 30;
+      const result = await ordersCollection.findOneAndUpdate(
+        {
+          orderId: data.orderId,
+        },
+        {
+          $set: { status: "Confirmed", estimatedTime, updatedAt: new Date() },
+          $push: {
+            statusHistory: {
+              status: "Confirmed",
+              timestamp: new Date(),
+              by: socket.id,
+              note: `Accepted with ${estimatedTime} mins estimated time`,
+            },
+          },
+        },
+        {
+          returnDocument: "after",
+        },
+      );
+      io.to(`order-${data.orderId}`).emit("statusUpdated", {
+        orderId: data.orderId,
+        estimatedTime,
+      });
+      socket.to("admins").emit("orderAcceptedByAdmin", {
+        orderId: data.orderId,
+      });
+      callback({ success: true, order: result });
+    } catch (error) {
+      callback({ success: false, message: error.message });
+    }
+  });
+  socket.on("rejectOrder", async (data, callback) => {
+    try {
+      if (!socket.isAdmin) {
+        return callback({ success: false, message: "Unauthorized" });
+      }
+      const ordersCollection = getCollection("orders");
+      const order = await ordersCollection.findOne({
+        orderId: data.orderId,
+      });
+      if (!order || order.status !== "pending") {
+        return callback({
+          success: false,
+          message: "Can not reject this order",
+        });
+      }
+      await ordersCollection.updateOne(
+        {
+          orderId: data.orderId,
+        },
+        {
+          $set: { status: "cancelled", updatedAt: new Date() },
+          $push: {
+            statusHistory: {
+              status: "cancelled",
+              timestamp: new Date(),
+              by: socket.id,
+              note: `Rejected ${data.reason}`,
+            },
+          },
+        },
+      );
+      io.to(`order-${data.orderId}`).emit("orderRejected", {
+        orderId: data.orderId,
+        reason: data.reason,
+      });
+      callback({ success: true });
+    } catch (error) {
+      console.log("Reject order error", error);
+      callback({ success: false, message: "Failed to reject order" });
+    }
+  });
+  socket.on("getLiveStats", async (callback) => {
+    try {
+      if (!socket.isAdmin) {
+        return callback({ success: false, message: "Unauthorized" });
+      }
+      const ordersCollection = getCollection("orders");
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const stats = {
+        totalToday: await ordersCollection.countDocument({
+          createdAt: { $gte: today },
+        }),
+        pending: await ordersCollection.countDocument({ status: "pending" }),
+        confirmed: await ordersCollection.countDocument({
+          status: "confirmed",
+        }),
+        preparing: await ordersCollection.countDocument({
+          status: "preparing",
+        }),
+        ready: await ordersCollection.countDocument({ status: "ready" }),
+        outForDelivery: await ordersCollection.countDocument({
+          status: "out_for_delivery",
+        }),
+        delivered: await ordersCollection.countDocument({
+          status: "delivered",
+        }),
+        cancelled: await ordersCollection.countDocument({
+          status: "cancelled",
+        }),
+      };
+      callback({ success: true, stats });
+    } catch (error) {
+      console.log("Get stats error", error);
+      callback({ success: false, message: "Failed to load stats" });
+    }
+  });
+  socket.on("disconnect", () => {
+    console.log(`User disconnected: ${socket.id}`);
+    if (!socket.isAdmin) {
+      socket.to("admins").emit("adminDisconnected", { adminId: socket.id });
+    }
   });
 };
